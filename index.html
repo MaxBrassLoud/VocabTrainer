@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#6366f1">
+    <title>Pro Vokabeltrainer</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>">
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://js.hcaptcha.com/1/api.js?onload=onloadHCaptcha&render=explicit" async defer></script>
+    <script>
+        (function() {
+            const saved = localStorage.getItem('theme');
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            if (saved === 'dark' || (!saved && prefersDark)) document.documentElement.setAttribute('data-theme', 'dark');
+        })();
+    </script>
+    <!-- QR Code Generator Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<!-- CUSTOM CONFIRM MODAL -->
+<div id="confirmModal" class="modal-overlay" style="display: none; z-index: 2000;">
+    <div class="modal" style="text-align: center;">
+        <h2 style="margin-bottom: 15px;" data-i18n="confirmExitTitle">Session beenden?</h2>
+        <p style="color: var(--text-muted); margin-bottom: 20px;" data-i18n="confirmExit">Möchtest du die Session unterbrechen? Fortschritt wird gespeichert.</p>
+        <div class="modal-actions" style="display: flex; gap: 10px;">
+            <button class="btn btn-secondary" onclick="closeConfirmModal()" data-i18n="btnCancel">Abbrechen</button>
+            <button class="btn btn-primary" onclick="executeConfirmAction()" data-i18n="btnYesExit">Ja, beenden</button>
+        </div>
+    </div>
+</div>
+
+<!-- MFA LOGIN MODAL (Wird gezeigt, wenn 2FA aktiv ist) -->
+<div id="mfaLoginModal" class="modal-overlay" style="display: none; z-index: 2000;">
+    <div class="modal">
+        <h2 data-i18n="mfaLoginTitle">Zwei-Faktor-Authentifizierung</h2>
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 15px;" data-i18n="mfaLoginDesc">Bitte gib den 6-stelligen Code aus deiner Authenticator-App ein.</p>
+
+        <input type="text" id="mfaLoginCode" class="modal-input" placeholder="123456" maxlength="6" style="text-align: center; font-size: 24px; letter-spacing: 5px;">
+        <button class="btn btn-primary" onclick="verifyMfaLogin()" data-i18n="btnVerify">Bestätigen</button>
+
+        <div style="margin-top: 15px; text-align: center;">
+            <a href="#" style="font-size: 12px; color: var(--primary);" onclick="toggleBackupCodeLogin()" data-i18n="mfaUseBackup">Backup-Code verwenden</a>
+        </div>
+
+        <div id="backupCodeLoginSection" style="display: none; margin-top: 15px;">
+            <input type="text" id="mfaBackupCode" class="modal-input" placeholder="XXXX-XXXX" style="text-align: center;">
+            <button class="btn btn-secondary" onclick="verifyBackupCodeLogin()" data-i18n="btnVerifyBackup">Backup-Code einlösen</button>
+        </div>
+    </div>
+</div>
+
+<div class="app-container">
+    <header class="top-bar">
+        <button id="btnBack" class="icon-btn" onclick="askConfirmExit()" style="display: none;">←</button>
+        <h1 id="appTitle" data-i18n="appTitle">Vokabeltrainer</h1>
+        <div class="header-actions">
+            <button id="syncStatusBtn" class="icon-btn sync-indicator" onclick="openAuthModal()" title="Account">☁️</button>
+            <button id="themeToggle" class="icon-btn" onclick="toggleTheme()" title="Theme">🌙</button>
+            <select class="lang-select" id="uiLangSelect" onchange="changeUILanguage(this.value)">
+                <option value="de">DE</option>
+                <option value="en">EN</option>
+            </select>
+        </div>
+    </header>
+
+    <div class="progress-container" id="progressContainer" style="display: none;">
+        <div class="progress-bar" id="progressBar"></div>
+    </div>
+
+    <div class="gamification-bar" id="gamificationBar" style="display: none;">
+        <div class="gamification-item"><span>🔥</span> <span id="streakDisplay">0</span></div>
+        <div class="gamification-item"><span>⭐</span> <span id="xpDisplay">0</span> XP</div>
+        <div class="gamification-item"><span>🏆</span> Lv. <span id="levelDisplay">1</span></div>
+        <div class="gamification-item"><span>📊</span> <span id="masteredDisplay">0</span></div>
+    </div>
+
+    <div id="setupScreen" class="screen active">
+        <div id="resumeBanner" class="resume-banner">
+            <span data-i18n="resumeMsg">Unvollendete Lerneinheit!</span>
+            <button onclick="resumeSession()" class="btn-small" data-i18n="btnResume">Fortsetzen</button>
+        </div>
+        <div class="glass-panel" id="setupLoadingPanel" style="display: none; text-align: center; padding: 40px;">
+            <p data-i18n="msgLoadingData">Lade Vokabeln aus der Cloud...</p>
+        </div>
+        <div class="glass-panel" id="setupFormPanel">
+            <div class="form-group">
+                <label data-i18n="labelLang">Was möchtest du lernen?</label>
+                <select id="langSelect" onchange="updateBooks()"></select>
+            </div>
+            <div class="form-group">
+                <label data-i18n="labelBook">Welches Buch?</label>
+                <select id="bookSelect" onchange="updateChapters()" disabled></select>
+            </div>
+            <div class="form-group">
+                <label data-i18n="labelChapters">Kapitel (Mehrfachauswahl)</label>
+                <div id="chaptersContainer" class="chapters-grid"></div>
+            </div>
+            <div class="form-group">
+                <label data-i18n="labelDirection">Abfragerichtung</label>
+                <select id="directionSelect">
+                    <option value="mixed" data-i18n="dirMixed">Mischung (beide Richtungen)</option>
+                    <option value="target-to-native" data-i18n="dirTargetToNative">Fremdsprache → Muttersprache</option>
+                    <option value="native-to-target" data-i18n="dirNativeToTarget">Muttersprache → Fremdsprache</option>
+                </select>
+            </div>
+            <button class="btn btn-primary" onclick="startLearning()" id="btnStart" data-i18n="btnStart">Lernen starten 🚀</button>
+        </div>
+        <div class="action-buttons">
+            <button class="btn btn-secondary" onclick="exportProgress()" data-i18n="btnExport">📤 Export</button>
+            <button class="btn btn-secondary" onclick="importProgress()" data-i18n="btnImport">📥 Import</button>
+            <button class="btn btn-secondary" onclick="showDifficultWords()" data-i18n="btnDifficult">⚠️ Schwierige Wörter</button>
+        </div>
+    </div>
+
+    <div id="learnScreen" class="screen">
+        <div class="stats-bar">
+            <span id="statLeft" class="stat-badge">Warteschlange: 0</span>
+            <span id="statScore" class="stat-badge">✅ 0 | ❌ 0</span>
+        </div>
+        <div class="question-area">
+            <div class="flashcard-wrapper">
+                <div class="flashcard" id="flashcard">
+                    <div class="card-face front">
+                        <span class="question-type-label" id="questionTypeLabel"></span>
+                        <span class="direction-label" id="directionLabel"></span>
+                        <div class="word" id="frontWord">...</div>
+                    </div>
+                    <div class="card-face back">
+                        <div class="translation" id="backWord">...</div>
+                    </div>
+                </div>
+            </div>
+            <div class="feedback" id="feedbackMsg"></div>
+        </div>
+        <div id="answerArea" class="answer-area"></div>
+    </div>
+</div>
+
+<!-- AUTH MODAL -->
+<div id="authModal" class="modal-overlay" style="display: none;">
+    <div class="modal" style="max-height: 90vh; overflow-y: auto;">
+        <h2 data-i18n="authTitle">Account</h2>
+
+        <!-- Wenn eingeloggt -->
+        <div id="authLoggedInView" style="display: none;">
+            <p id="authStatus" class="auth-status" style="font-weight: bold; margin-bottom: 20px;"></p>
+
+            <div class="form-group">
+                <label data-i18n="labelUsername">Benutzername</label>
+                <input type="text" id="profileUsername" class="modal-input">
+                <button class="btn btn-small" style="margin-top: 8px; width: auto;" onclick="updateUsername()" data-i18n="btnSaveUsername">Speichern</button>
+            </div>
+
+            <hr style="border: 0; border-top: 1px solid var(--border); margin: 20px 0;">
+
+            <!-- Passwort ändern -->
+            <div class="form-group">
+                <label data-i18n="labelCurrentPassword">Aktuelles Passwort</label>
+                <input type="password" id="profileCurrentPassword" class="modal-input" placeholder="••••••••">
+
+                <label data-i18n="labelNewPassword" style="margin-top: 10px;">Neues Passwort</label>
+                <input type="password" id="profileNewPassword" class="modal-input" placeholder="••••••••">
+
+                <label data-i18n="labelConfirmNewPassword" style="margin-top: 10px;">Neues Passwort wiederholen</label>
+                <input type="password" id="profileConfirmPassword" class="modal-input" placeholder="••••••••">
+
+                <button class="btn btn-small" style="margin-top: 8px; width: auto;" onclick="updatePassword()" data-i18n="btnChangePassword">Passwort ändern</button>
+            </div>
+
+            <hr style="border: 0; border-top: 1px solid var(--border); margin: 20px 0;">
+
+            <!-- 2FA (TOTP) -->
+            <div class="form-group">
+                <label>Zwei-Faktor-Authentifizierung (2FA)</label>
+                <div id="mfaStatus" style="font-size: 13px; margin-bottom: 10px; font-weight: 600;">Status: Deaktiviert</div>
+
+                <div id="mfaSetupArea" style="display: none; background: var(--bg-gradient); padding: 15px; border-radius: 10px; border: 1px solid var(--border);">
+                    <p style="font-size: 12px; margin-bottom: 10px; text-align: center;">Scanne diesen QR-Code mit deiner Authenticator-App:</p>
+
+                    <!-- QR Code Container -->
+                    <div id="mfaQrCode"></div>
+
+                    <!-- Manueller Fallback -->
+                    <div style="text-align: center; margin-bottom: 15px;">
+                        <span style="font-size: 11px; color: var(--text-muted);">Kein Scanner? Gib diesen Code manuell ein:</span>
+                        <div id="mfaManualSecret" class="mfa-manual-key"></div>
+                    </div>
+
+                    <input type="text" id="mfaSetupCode" class="modal-input" placeholder="6-stelliger Code" maxlength="6" style="text-align: center; font-size: 20px; letter-spacing: 3px;">
+                    <button class="btn btn-primary" style="margin-top: 5px;" onclick="verifyMfaSetup()">Aktivieren</button>
+                </div>
+
+                <!-- Backup Codes Bereich (wird nach Setup gezeigt) -->
+                <div id="mfaBackupArea" style="display: none; margin-top: 10px; background: #fff3cd; padding: 15px; border-radius: 10px; border: 1px solid #ffc107; color: #856404;">
+                    <p style="font-size: 12px; font-weight: bold; margin-bottom: 10px;">WICHTIG: Speichere diese Backup-Codes sicher! Du siehst sie nur einmal.</p>
+                    <div id="backupCodesGrid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-family: monospace; font-size: 14px; font-weight: bold;"></div>
+                </div>
+
+                <div id="mfaActionButtons">
+                    <button id="btnEnableMfa" class="btn btn-secondary" style="width: auto; margin-top: 5px;" onclick="startMfaSetup()">2FA aktivieren</button>
+                </div>
+            </div>
+
+            <div class="modal-actions" style="margin-top: 20px;">
+                <button class="btn btn-secondary" onclick="handleLogout()" data-i18n="btnLogout">Logout</button>
+            </div>
+        </div>
+
+        <!-- Wenn NICHT eingeloggt -->
+        <div id="authFormsView" style="display: block;">
+            <div class="auth-tabs">
+                <button id="tabLogin" class="auth-tab active" onclick="switchAuthTab('login')">Login</button>
+                <button id="tabRegister" class="auth-tab" onclick="switchAuthTab('register')">Registrieren</button>
+            </div>
+            <div id="formLogin" class="auth-form">
+                <input type="email" id="loginEmail" placeholder="E-Mail" class="modal-input">
+                <input type="password" id="loginPassword" placeholder="Passwort" class="modal-input">
+                <div id="hcaptcha-login" class="h-captcha-container"></div>
+                <button class="btn btn-primary" onclick="handleLogin()" data-i18n="btnLogin">Einloggen</button>
+            </div>
+            <div id="formRegister" class="auth-form" style="display: none;">
+                <input type="email" id="regEmail" placeholder="E-Mail" class="modal-input">
+                <input type="password" id="regPassword" placeholder="Passwort" class="modal-input">
+                <input type="password" id="regPasswordConfirm" placeholder="Passwort wiederholen" class="modal-input">
+                <div id="hcaptcha-register" class="h-captcha-container"></div>
+                <button class="btn btn-primary" onclick="handleRegister()" data-i18n="btnRegister">Account erstellen</button>
+            </div>
+        </div>
+
+        <button class="btn btn-secondary" style="margin-top: 15px;" onclick="closeAuthModal()" data-i18n="btnClose">Schließen</button>
+    </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
